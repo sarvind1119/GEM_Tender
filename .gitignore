@@ -1,0 +1,65 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+tools/.env
+*.key
+*.pem
+*.pfx
+*.crt
+
+# Local Streamlit/app data
+app_data/
+.streamlit/secrets.toml
+streamlit*.log
+*.log
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Real procurement datasets and bidder uploads
+Tender_*/01_Tender_Document/
+Tender_*/01_Tender_Documents/
+Tender_*/02_Eligibility_and_Terms/
+Tender_*/03_Bidder_Submissions/
+
+# Generated extraction/review outputs
+Tender_*/05_Extraction_Output/
+Tender_*/06_Compliance_Matrix/
+Tender_*/07_Audit_Log/
+**/05_Extraction_Output/
+**/06_Compliance_Matrix/
+**/07_Audit_Log/
+**/tmp/
+**/temp/
+**/*_rendered_pages/
+**/*_ocr_images/
+
+# Local pilot/control spreadsheets that may contain real procurement data
+Tender_*/04_Control_Artifacts/
+agent/*.xlsx
+Layer2/*.xlsx
+Compare-Specification-*.xls
+
+# Local meeting/transcript notes
+(Audio)*
+MeetSummary.txt
