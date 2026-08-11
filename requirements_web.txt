@@ -1,2 +1,9 @@
-streamlit>=1.36
+streamlit==1.57.0
 python-dotenv>=1.0
+pandas>=2.0
+openpyxl>=3.1
+pillow>=10.0
+pypdf>=4.0
+pdf2image>=1.17
+PyMuPDF>=1.24
+pytest>=8.0,<9

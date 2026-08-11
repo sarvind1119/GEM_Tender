@@ -22,8 +22,8 @@ DEFAULT_ENGINE = "paddle"
 
 AGENT_STEPS = [
     ("agent_1_identity", "Agent 1: OCR, PAN/GSTIN, bidder identity"),
-    ("agent_2_required_documents", "Agent 2: tender required documents"),
-    ("agent_2_bidder_matrix", "Agent 2: bidder document matrix"),
+    ("agent_2_required_documents", "Agent 2: tender bidder requirements"),
+    ("agent_2_bidder_matrix", "Agent 2: bidder requirements matrix"),
     ("agent_3_turnover", "Agent 3: turnover evaluation"),
 ]
 
@@ -74,16 +74,29 @@ def load_env_file(env_path: Path | None = None) -> None:
         os.environ.setdefault("TURNOVER_LLM_MODEL", evaluate_turnover_requirements.DEFAULT_GROQ_MODEL)
 
 
+def write_json_atomic(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
 def write_status(tender_root: Path, payload: dict[str, Any]) -> None:
     tender_root.mkdir(parents=True, exist_ok=True)
-    status_path(tender_root).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    payload["updated_at"] = now_iso()
+    write_json_atomic(status_path(tender_root), payload)
 
 
 def read_status(tender_root: Path) -> dict[str, Any]:
     path = status_path(tender_root)
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        # A torn read (worker writing while UI reads) or a corrupt file should not
+        # crash the app; the caller treats an empty status as "not started".
+        return {}
 
 
 def initial_status(tender_id: str, tender_root: Path) -> dict[str, Any]:
@@ -92,6 +105,7 @@ def initial_status(tender_id: str, tender_root: Path) -> dict[str, Any]:
         "tender_root": str(tender_root),
         "status": "queued",
         "started_at": "",
+        "updated_at": "",
         "completed_at": "",
         "active_step": "",
         "steps": [
@@ -119,6 +133,22 @@ def mark_step(status: dict[str, Any], step_id: str, step_status: str, message: s
         if step_status in {"Completed", "Failed"}:
             step["completed_at"] = now_iso()
         return
+
+
+def mark_run_failed(tender_root: Path, message: str) -> dict[str, Any]:
+    """Force a run into the failed state (e.g. when the UI detects a stalled worker)."""
+    status = read_status(tender_root)
+    if not status:
+        return {}
+    status["status"] = "failed"
+    status["error"] = message
+    status["completed_at"] = now_iso()
+    active_step = status.get("active_step")
+    if active_step:
+        mark_step(status, active_step, "Failed", message)
+    append_log(status, message)
+    write_status(tender_root, status)
+    return status
 
 
 def save_uploaded_file(destination_dir: Path, file_name: str, data: bytes) -> Path:
@@ -152,6 +182,85 @@ def create_upload_workspace(
     return tender_root
 
 
+def create_tender_preview_workspace(
+    run_id: str,
+    tender_files: list[tuple[str, bytes]],
+    replace_existing: bool = False,
+) -> Path:
+    return create_upload_workspace(run_id, tender_files, {}, {}, replace_existing=replace_existing)
+
+
+def append_bidder_uploads(
+    tender_root: Path,
+    bidder_files: dict[int, list[tuple[str, bytes]]],
+    bidder_names: dict[int, str] | None = None,
+) -> None:
+    bidder_root = tender_root / "03_Bidder_Submissions"
+    for index, files in bidder_files.items():
+        bidder_name = slugify((bidder_names or {}).get(index, "")) if bidder_names else ""
+        folder_name = f"Bidder_{index:02d}" + (f"_{bidder_name}" if bidder_name else "")
+        folder = bidder_root / folder_name
+        for file_name, data in files:
+            save_uploaded_file(folder, file_name, data)
+
+
+def run_tender_requirement_preview(
+    tender_id: str,
+    tender_root: str | Path,
+    engine: str = DEFAULT_ENGINE,
+    status_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    tender_root = Path(tender_root).resolve()
+    status = read_status(tender_root) or initial_status(tender_id, tender_root)
+    status["status"] = "running"
+    status["started_at"] = status.get("started_at") or now_iso()
+    status["completed_at"] = ""
+    status["error"] = ""
+    append_log(status, "Tender requirement preview started.")
+    write_status(tender_root, status)
+
+    def persist() -> None:
+        write_status(tender_root, status)
+        if status_callback:
+            status_callback(status)
+
+    try:
+        mark_step(status, "agent_1_identity", "Running", "Extracting tender page text.")
+        append_log(status, "Tender text extraction started.")
+        persist()
+        identity_engine = DEFAULT_ENGINE if engine == "auto" else engine
+        exit_code = run_phase1_identity_extraction.run(identity_engine, False, tender_id, tender_root)
+        if exit_code:
+            raise RuntimeError("Tender text extraction finished with validation issues. See output logs.")
+        mark_step(status, "agent_1_identity", "Completed", "Tender page text extracted.")
+        append_log(status, "Tender text extraction completed.")
+        persist()
+
+        mark_step(status, "agent_2_required_documents", "Running", "Extracting bidder requirements from tender.")
+        append_log(status, "Bidder requirement extraction started.")
+        persist()
+        exit_code = extract_tender_required_documents.run(tender_id, tender_root)
+        if exit_code:
+            raise RuntimeError("Bidder requirement extraction finished with validation issues.")
+        mark_step(status, "agent_2_required_documents", "Completed", "Bidder requirements extracted.")
+        append_log(status, "Bidder requirement preview completed.")
+        status["status"] = "requirements_ready"
+        status["completed_at"] = now_iso()
+        status["active_step"] = ""
+        persist()
+        return status
+    except Exception as exc:
+        status["status"] = "failed"
+        status["error"] = str(exc)
+        status["completed_at"] = now_iso()
+        active_step = status.get("active_step")
+        if active_step:
+            mark_step(status, active_step, "Failed", str(exc))
+        append_log(status, f"Tender requirement preview failed: {exc}")
+        persist()
+        return status
+
+
 def run_pipeline(
     tender_id: str,
     tender_root: str | Path,
@@ -162,6 +271,8 @@ def run_pipeline(
     status = read_status(tender_root) or initial_status(tender_id, tender_root)
     status["status"] = "running"
     status["started_at"] = status.get("started_at") or now_iso()
+    status["completed_at"] = ""
+    status["error"] = ""
     append_log(status, "Pipeline started.")
     write_status(tender_root, status)
 
@@ -184,7 +295,7 @@ def run_pipeline(
         append_log(status, "Agent 1 completed.")
         persist()
 
-        mark_step(status, "agent_2_required_documents", "Running", "Extracting tender required-document attributes.")
+        mark_step(status, "agent_2_required_documents", "Running", "Extracting bidder requirements from tender.")
         append_log(status, "Agent 2 requirement extraction started.")
         persist()
         exit_code = extract_tender_required_documents.run(tender_id, tender_root)
@@ -200,8 +311,8 @@ def run_pipeline(
         exit_code = build_bidder_review_matrix.run(tender_id, tender_root)
         if exit_code:
             raise RuntimeError("Agent 2 bidder matrix finished with validation issues.")
-        mark_step(status, "agent_2_bidder_matrix", "Completed", "Bidder document matrix completed.")
-        append_log(status, "Agent 2 bidder matrix completed.")
+        mark_step(status, "agent_2_bidder_matrix", "Completed", "Bidder requirements matrix completed.")
+        append_log(status, "Agent 2 bidder requirements matrix completed.")
         persist()
 
         mark_step(status, "agent_3_turnover", "Running", "Evaluating turnover evidence.")
@@ -240,4 +351,9 @@ def write_reviewed_workbook(path: Path, rows: list[dict[str, Any]], headers: lis
         ws.append([row.get(header, "") for header in headers])
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = ws.dimensions
-    wb.save(path)
+    try:
+        wb.save(path)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"Could not write {path.name}. It may be open in Excel — close it and try again."
+        ) from exc

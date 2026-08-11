@@ -103,7 +103,7 @@ def write_xlsx(path: Path, sheet_name: str, rows: list[dict[str, Any]], headers:
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name
-    ws.append(headers)
+    ws.append([excel_safe(header) for header in headers])
     for row in rows:
         ws.append([excel_safe(row.get(header, "")) for header in headers])
     ws.freeze_panes = "A2"
@@ -122,9 +122,30 @@ def write_xlsx(path: Path, sheet_name: str, rows: list[dict[str, Any]], headers:
 
 
 def normalize_header(value: str) -> str:
+    value = ILLEGAL_CHARACTERS_RE.sub(" ", value)
+    value = re.sub(r"[\x00-\x1f\x7f-\x9f]", " ", value)
     value = re.sub(r"\s+", " ", value).strip()
     value = value.replace("/", " ")
     return value
+
+
+def short_requirement_label(requirement: dict[str, Any]) -> str:
+    text = str(requirement.get("normalized_item_text") or requirement.get("requirement_text") or "").strip()
+    canonical = str(requirement.get("canonical_doc_type") or requirement.get("expected_bidder_doc_group") or "").strip()
+    requirement_id = str(requirement.get("requirement_id", ""))
+    if requirement_id.startswith("REQ-CON") and canonical:
+        text = canonical
+    elif len(normalize_header(text)) > 80 and canonical:
+        text = canonical
+    text = normalize_header(text)
+    return text[:80].strip() or "Requirement"
+
+
+def requirement_column_label(requirement: dict[str, Any]) -> str:
+    requirement_id = str(requirement.get("requirement_id", "")).strip()
+    text = short_requirement_label(requirement)
+    label = f"{requirement_id} {text}".strip()
+    return normalize_header(label)
 
 
 def normalize_text(value: str) -> str:
@@ -202,6 +223,13 @@ def keyword_match(requirement: dict[str, Any], doc: dict[str, Any]) -> bool:
     for keyword in keywords:
         if keyword in haystack:
             score += 2 if " " in keyword else 1
+            continue
+        words = [word for word in keyword.split() if word not in {"certificate", "document", "evidence", "proof"}]
+        if len(words) >= 2 and all(word in haystack for word in words):
+            score += 2
+        elif len(words) == 1 and any(generic in keyword.split() for generic in {"certificate", "document", "evidence", "proof"}):
+            if words[0] in haystack:
+                score += 2
     return score >= 2
 
 
@@ -227,7 +255,7 @@ def status_for_requirement(requirement: dict[str, Any], matches: list[dict[str, 
 def requirement_column_groups(requirements: list[dict[str, Any]]) -> list[str]:
     columns: list[str] = []
     for requirement in requirements:
-        label = normalize_header(requirement["normalized_item_text"])
+        label = requirement_column_label(requirement)
         columns.extend(
             [
                 f"{label}_status",
@@ -265,7 +293,7 @@ def build_matrix_rows(
         }
         overall_needs_review = row["identity_needs_human_review"] == "Yes"
         for requirement in requirements:
-            label = normalize_header(requirement["normalized_item_text"])
+            label = requirement_column_label(requirement)
             matches = match_requirement_to_docs(requirement, docs)
             status, note = status_for_requirement(requirement, matches)
             if status == STATUS_REVIEW:
@@ -286,7 +314,7 @@ def validate_rows(rows: list[dict[str, Any]], requirements: list[dict[str, Any]]
     if len(rows) != len(identity_rows):
         issues.append(f"Matrix row count {len(rows)} does not match identity row count {len(identity_rows)}.")
     for requirement in requirements:
-        label = normalize_header(requirement["normalized_item_text"])
+        label = requirement_column_label(requirement)
         required_cols = [
             f"{label}_status",
             f"{label}_source_files",

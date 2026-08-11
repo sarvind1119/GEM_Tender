@@ -31,6 +31,9 @@ STATUS_REVIEW_NOT_REQUIRED = "Not Required"
 ATTRIBUTE_HEADERS = [
     "tender_id",
     "requirement_id",
+    "requirement_type",
+    "requirement_text",
+    "expected_bidder_evidence",
     "source_document_id",
     "source_file",
     "source_page",
@@ -53,10 +56,24 @@ ATTRIBUTE_HEADERS = [
     "strict_document_name_required",
     "human_review_required_for_presence",
     "source_text_snippet",
+    "source_snippet",
     "extraction_method",
     "confidence",
+    "extraction_confidence",
     "review_status",
     "notes",
+]
+
+REQUIREMENT_PREVIEW_HEADERS = [
+    "requirement_id",
+    "requirement_type",
+    "requirement_text",
+    "expected_bidder_evidence",
+    "source_file",
+    "source_page",
+    "source_snippet",
+    "extraction_confidence",
+    "review_status",
 ]
 
 FIELD_HEADERS = [
@@ -112,6 +129,8 @@ def output_paths(tender_id: str, tender_root: str | Path | None = None) -> dict[
         "field_json": req_root / "document_required_from_seller.json",
         "attributes_xlsx": req_root / "required_document_attributes.xlsx",
         "attributes_json": req_root / "required_document_attributes.json",
+        "bidder_requirements_xlsx": req_root / "bidder_requirements.xlsx",
+        "bidder_requirements_json": req_root / "bidder_requirements.json",
         "notes_json": req_root / "extraction_notes.json",
     }
 
@@ -381,6 +400,21 @@ def normalized_item_text(item: str) -> str:
     return item[:1].upper() + item[1:] if item else item
 
 
+def preview_type_from_category(category: str, item: str = "") -> str:
+    norm = normalize_for_match(item)
+    if category == "financial_turnover" or "turnover" in norm:
+        return "financial_criteria"
+    if category in {"experience", "past_performance"}:
+        return "experience_criteria"
+    if category in {"oem_authorization", "oem_turnover"} or "oem" in norm:
+        return "oem_condition"
+    if category == "atc_reference" or "atc" in norm:
+        return "atc_reference"
+    if "declaration" in norm or "undertaking" in norm:
+        return "declaration"
+    return "document"
+
+
 def mapping_for_item(item: str) -> dict[str, Any]:
     norm = normalize_for_match(item)
     if "certificate requested in atc" in norm:
@@ -502,18 +536,18 @@ def mapping_for_item(item: str) -> dict[str, Any]:
         "requirement_category": "unknown",
         "evidence_expected": item,
         "matching_keywords": item,
-        "presence_check_ready": "No",
-        "needs_clause_expansion": "Yes",
-        "applicability_condition": "Unknown; human review required.",
+        "presence_check_ready": "Yes",
+        "needs_clause_expansion": "No",
+        "applicability_condition": "Explicit tender document item; keyword-based presence check is allowed.",
         "is_atc_reference": "No",
         "atc_expansion_status": "Not Applicable",
-        "expected_bidder_doc_group": "Unknown",
+        "expected_bidder_doc_group": "Tender requested document",
         "suggested_filename_keywords": item,
-        "possible_satisfying_documents": "Unknown; human review required",
+        "possible_satisfying_documents": item,
         "strict_document_name_required": "No",
-        "human_review_required_for_presence": "Yes",
+        "human_review_required_for_presence": "No",
         "review_status": STATUS_REVIEW_PENDING,
-        "notes": "Unmapped item retained for manual review.",
+        "notes": "Unmapped document item retained and checked by filename/type keywords.",
     }
 
 
@@ -524,23 +558,182 @@ def build_attributes(tender_id: str, field_blocks: list[dict[str, Any]]) -> list
         items = split_preserving_parentheses(block["raw_field_text"])
         for item in items:
             mapping = mapping_for_item(item)
+            requirement_type = preview_type_from_category(mapping["requirement_category"], item)
+            requirement_text = normalized_item_text(item)
             row = {
                 "tender_id": tender_id,
                 "requirement_id": f"REQ-DOC-{counter:03d}",
+                "requirement_type": requirement_type,
+                "requirement_text": requirement_text,
+                "expected_bidder_evidence": mapping["evidence_expected"],
                 "source_document_id": block["source_document_id"],
                 "source_file": block["source_file"],
                 "source_page": block["source_page"],
                 "source_label": block["source_label"],
                 "raw_field_text": block["raw_field_text"],
                 "raw_item_text": item,
-                "normalized_item_text": normalized_item_text(item),
+                "normalized_item_text": requirement_text,
                 "source_text_snippet": block["_snippet"],
+                "source_snippet": block["_snippet"],
                 "extraction_method": block["extraction_method"],
                 "confidence": block["confidence"],
+                "extraction_confidence": block["confidence"],
                 **mapping,
             }
             rows.append(row)
             counter += 1
+    return rows
+
+
+CONDITION_RULES: list[dict[str, Any]] = [
+    {
+        "requirement_type": "financial_criteria",
+        "canonical_doc_type": "Bidder turnover criteria",
+        "requirement_category": "financial_turnover",
+        "evidence_expected": "Bidder turnover proof or audited financial evidence",
+        "pattern": r"minimum\s+average\s+annual\s+turnover\s+of\s+the\s+bidder|bidder\s+turnover|financial\s+turnover",
+    },
+    {
+        "requirement_type": "financial_criteria",
+        "canonical_doc_type": "OEM turnover criteria",
+        "requirement_category": "oem_turnover",
+        "evidence_expected": "OEM turnover proof or audited financial evidence",
+        "pattern": r"oem\s+average\s+turnover|oem\s+annual\s+turnover|oem.*turnover",
+    },
+    {
+        "requirement_type": "experience_criteria",
+        "canonical_doc_type": "Experience criteria",
+        "requirement_category": "experience",
+        "evidence_expected": "Experience certificate, work order, completion certificate, CRAC, or similar evidence",
+        "pattern": r"experience\s+criteria|past\s+experience|similar\s+work|work\s+order|completion\s+certificate|crac|past\s+performance",
+    },
+    {
+        "requirement_type": "oem_condition",
+        "canonical_doc_type": "OEM authorization condition",
+        "requirement_category": "oem_authorization",
+        "evidence_expected": "OEM authorization certificate or manufacturer authorization evidence",
+        "pattern": r"oem\s+authori[sz]ation|manufacturer\s+authori[sz]ation|authori[sz]ation\s+certificate",
+    },
+    {
+        "requirement_type": "technical_condition",
+        "canonical_doc_type": "Technical criteria",
+        "requirement_category": "technical_condition",
+        "evidence_expected": "Technical compliance document, specification sheet, catalogue, or supporting certificate",
+        "pattern": r"technical\s+(?:specification|criteria|compliance)|compliance\s+sheet|specification\s+document",
+    },
+    {
+        "requirement_type": "declaration",
+        "canonical_doc_type": "Declaration / undertaking",
+        "requirement_category": "declaration",
+        "evidence_expected": "Declaration, undertaking, certificate, affidavit, or annexure requested by the tender",
+        "pattern": r"declaration|undertaking|self\s+certification|certificate\s+to\s+be\s+submitted|annexure",
+    },
+    {
+        "requirement_type": "atc_reference",
+        "canonical_doc_type": "ATC referenced condition",
+        "requirement_category": "atc_reference",
+        "evidence_expected": "Document or evidence requested in Buyer Added Bid Specific ATC",
+        "pattern": r"buyer\s+added\s+bid\s+specific\s+atc|requested\s+in\s+atc|certificate\s*\(requested\s+in\s+atc\)|atc\s+clause",
+    },
+    {
+        "requirement_type": "other_condition",
+        "canonical_doc_type": "Applicability / exemption condition",
+        "requirement_category": "other_condition",
+        "evidence_expected": "Applicability or exemption evidence, where relevant",
+        "pattern": r"\bmse\b|startup|start-up|exemption|exempted|applicable\s+for|not\s+applicable",
+    },
+]
+
+
+def condition_candidate_text(text: str, start: int, end: int) -> str:
+    line_start = text.rfind("\n", 0, start)
+    line_end = text.find("\n", end)
+    if line_start < 0:
+        line_start = max(0, start - 220)
+    if line_end < 0:
+        line_end = min(len(text), end + 220)
+    left = max(0, line_start)
+    right = min(len(text), line_end)
+    candidate = clean_item(clean_field_text(text[left:right]))
+    if candidate and 18 <= len(candidate) <= 220:
+        return candidate
+    return source_snippet(text, start, end, width=140)
+
+
+def build_condition_rows(
+    tender_id: str,
+    manifest_rows: list[dict[str, Any]],
+    page_rows: list[dict[str, Any]],
+    existing_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    manifest_lookup = manifest_by_document_id(manifest_rows)
+    seen = {
+        (row.get("requirement_type", ""), normalize_for_match(row.get("requirement_text") or row.get("normalized_item_text", "")))
+        for row in existing_rows
+    }
+    rows: list[dict[str, Any]] = []
+    counter = 1
+    for page in page_rows:
+        doc = manifest_lookup.get(page["document_id"], {})
+        if doc.get("document_side") != "tender-side":
+            continue
+        text = page.get("chosen_text", "") or ""
+        for rule in CONDITION_RULES:
+            for match in re.finditer(rule["pattern"], text, flags=re.IGNORECASE):
+                requirement_text = normalized_item_text(condition_candidate_text(text, match.start(), match.end()))
+                normalized_key = normalize_for_match(requirement_text)
+                if not normalized_key:
+                    continue
+                key = (rule["requirement_type"], normalized_key)
+                if key in seen:
+                    continue
+                seen.add(key)
+                snippet = source_snippet(text, match.start(), match.end())
+                rows.append(
+                    {
+                        "tender_id": tender_id,
+                        "requirement_id": f"REQ-CON-{counter:03d}",
+                        "requirement_type": rule["requirement_type"],
+                        "requirement_text": requirement_text,
+                        "expected_bidder_evidence": rule["evidence_expected"],
+                        "source_document_id": page["document_id"],
+                        "source_file": page.get("file_name", doc.get("file_name", "")),
+                        "source_page": page.get("page_number", ""),
+                        "source_label": rule["canonical_doc_type"],
+                        "raw_field_text": requirement_text,
+                        "raw_item_text": requirement_text,
+                        "normalized_item_text": requirement_text,
+                        "canonical_doc_type": rule["canonical_doc_type"],
+                        "requirement_category": rule["requirement_category"],
+                        "evidence_expected": rule["evidence_expected"],
+                        "matching_keywords": requirement_text,
+                        "presence_check_ready": "No",
+                        "needs_clause_expansion": "Yes",
+                        "applicability_condition": "Semantic criteria extracted for reviewer confirmation.",
+                        "is_atc_reference": "Yes" if rule["requirement_type"] == "atc_reference" else "No",
+                        "atc_expansion_status": "Pending Review" if rule["requirement_type"] == "atc_reference" else "Not Applicable",
+                        "expected_bidder_doc_group": rule["canonical_doc_type"],
+                        "suggested_filename_keywords": requirement_text,
+                        "possible_satisfying_documents": rule["evidence_expected"],
+                        "strict_document_name_required": "No",
+                        "human_review_required_for_presence": "Yes",
+                        "source_text_snippet": snippet,
+                        "source_snippet": snippet,
+                        "extraction_method": "condition_keyword_parser",
+                        "confidence": 0.65,
+                        "extraction_confidence": 0.65,
+                        "review_status": STATUS_REVIEW_PENDING,
+                        "notes": "Criteria or condition extracted from tender text; bidder-wise evaluation requires human review or a dedicated evaluator.",
+                    }
+                )
+                counter += 1
+    return rows
+
+
+def preview_rows(attribute_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for row in attribute_rows:
+        rows.append({header: row.get(header, "") for header in REQUIREMENT_PREVIEW_HEADERS})
     return rows
 
 
@@ -555,13 +748,15 @@ def extraction_notes(
         "text_index_rows": len(text_index_rows),
         "field_blocks_found": len(field_blocks),
         "attribute_rows": len(attribute_rows),
+        "bidder_requirement_rows": len(attribute_rows),
         "tender_side_pages_scanned": sum(1 for row in text_index_rows if row["document_side"] == "tender-side"),
         "bidder_side_pages_ignored_for_requirement_extraction": sum(1 for row in text_index_rows if row["document_side"] == "bidder-side"),
         "label_aliases": LABEL_ALIASES,
         "notes": [
             "Requirement extraction uses only tender-side chosen_text.",
-            "Certificate (Requested in ATC) is captured and deferred for clause expansion.",
-            "Bidder submission presence is not checked in this step.",
+            "Explicit documents, criteria, conditions, exemptions, and ATC references are displayed for reviewer confirmation.",
+            "Criteria and ATC references are captured as Needs Review unless a dedicated evaluator exists.",
+            "Bidder submission evaluation is not performed in this step.",
         ],
     }
 
@@ -575,12 +770,10 @@ def validate_outputs(
     issues: list[str] = []
     if len(text_index_rows) != len(all_pages):
         issues.append(f"Text index row count {len(text_index_rows)} does not match page row count {len(all_pages)}.")
-    if not field_blocks:
-        issues.append("No Document required from seller field block found.")
     if any("bidder" in str(row.get("document_side", "")).lower() for row in field_blocks):
         issues.append("A bidder-side field block was used unexpectedly.")
     if not attribute_rows:
-        issues.append("No required-document attributes extracted.")
+        issues.append("No bidder requirements extracted from tender-side text.")
     for row in attribute_rows:
         if row["normalized_item_text"].casefold().startswith("in case any bidder"):
             issues.append("Exemption note was emitted as a required-document item.")
@@ -594,7 +787,9 @@ def run(tender_id: str, tender_root: str | Path | None = None) -> int:
     all_pages = load_json(paths["all_pages"])
     text_index_rows = build_text_index(tender_id, manifest_rows, all_pages)
     field_blocks = extract_field_blocks(tender_id, manifest_rows, all_pages)
-    attribute_rows = build_attributes(tender_id, field_blocks)
+    document_rows = build_attributes(tender_id, field_blocks)
+    condition_rows = build_condition_rows(tender_id, manifest_rows, all_pages, document_rows)
+    attribute_rows = document_rows + condition_rows
     notes = extraction_notes(tender_id, text_index_rows, field_blocks, attribute_rows)
     issues = validate_outputs(text_index_rows, field_blocks, attribute_rows, all_pages)
     notes["validation_issues"] = issues
@@ -605,11 +800,13 @@ def run(tender_id: str, tender_root: str | Path | None = None) -> int:
     write_json(paths["field_json"], [{k: v for k, v in row.items() if not k.startswith("_")} for row in field_blocks])
     write_xlsx(paths["attributes_xlsx"], "Required Attributes", attribute_rows, ATTRIBUTE_HEADERS)
     write_json(paths["attributes_json"], attribute_rows)
+    write_xlsx(paths["bidder_requirements_xlsx"], "Bidder Requirements", preview_rows(attribute_rows), REQUIREMENT_PREVIEW_HEADERS)
+    write_json(paths["bidder_requirements_json"], preview_rows(attribute_rows))
     write_json(paths["notes_json"], notes)
 
     print(f"Text index rows: {len(text_index_rows)}")
     print(f"Field blocks found: {len(field_blocks)}")
-    print(f"Required document attributes: {len(attribute_rows)}")
+    print(f"Bidder requirement rows: {len(attribute_rows)}")
     print(f"Validation issues: {len(issues)}")
     for issue in issues:
         print(f"- {issue}")
@@ -617,7 +814,7 @@ def run(tender_id: str, tender_root: str | Path | None = None) -> int:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Extract GeM tender required-document attributes.")
+    parser = argparse.ArgumentParser(description="Extract GeM tender bidder requirements.")
     parser.add_argument("--tender-id", default=DEFAULT_TENDER_ID)
     parser.add_argument("--tender-root", default="", help="Optional explicit tender workspace root.")
     args = parser.parse_args()

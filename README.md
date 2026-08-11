@@ -62,7 +62,8 @@ Real tender documents, bidder submissions, generated OCR outputs, app uploads, l
 ## Install
 
 ```powershell
-python -m pip install -r requirements_web.txt
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements_web.txt
 ```
 
 The OCR pipeline also requires the existing local OCR/PDF stack used in the pilot, including Tesseract/Poppler and optional PaddleOCR.
@@ -81,10 +82,35 @@ If no API key is configured, turnover evaluation falls back to conservative loca
 ## Run The Web App
 
 ```powershell
-streamlit run app.py
+.\run_app.ps1
 ```
 
-Upload the tender PDF, enter the number of bidders, upload bidder-wise documents, and click `Process`.
+The launcher now requires the project-local environment and intentionally does not
+fall back to another Python installation:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements_web.txt
+.\run_app.ps1
+```
+
+The reviewer-first interface uses task-based pages for tender setup, requirement
+confirmation, bidder review with evidence, and normalized export. The previous
+matrix-oriented interface remains temporarily available for pilot comparison:
+
+```powershell
+.\run_app.ps1 -Legacy
+```
+
+Equivalent explicit command:
+
+```powershell
+.\.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+Open **Tender Setup**, upload the tender PDF(s), analyze the tender requirements,
+then upload and process each bidder's documents. Continue through **Tender
+Requirements**, **Review Bidders**, and **Export & Audit**.
 
 Each local run is stored under:
 
